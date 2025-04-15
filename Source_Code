@@ -1,0 +1,146 @@
+// Define Area of Interest (AOI)
+var aoi = ee.FeatureCollection('projects/gee-trial2/assets/Pune_Division_Boundary');
+Map.centerObject(aoi, 8);
+
+// Load Sentinel-2 image collection
+var sentinel2 = ee.ImageCollection('COPERNICUS/S2')
+                               .filterBounds(aoi)
+                               .filterDate('2024-01-01', '2024-12-31')
+                               .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+                               .select(['B1', 'B2', 'B4', 'B5']);
+
+// Define the dry soil function
+var addDrySoil = function(img) {
+  var drySoil = img.expression(
+    'swir1 > blue && red > 0.05',
+    {
+      'blue': img.select('B2'),
+      'red': img.select('B4'),
+      'swir1': img.select('B5')
+    }).rename('DS');
+  return img.addBands(drySoil);
+};
+
+// Apply dry soil function to image collection
+var drySoilCollection = sentinel2.map(addDrySoil);
+
+// ------------5-Day Interval Grouping-------------
+var startDate = ee.Date('2024-01-01');
+var endDate = ee.Date('2024-12-31');
+
+// Generate list of 5-day interval start dates
+var nSteps = endDate.difference(startDate, 'day').divide(5).floor();
+var intervals = ee.List.sequence(0, nSteps.subtract(1)).map(function(i) {
+  return startDate.advance(ee.Number(i).multiply(5), 'day');
+});
+
+// Map over 5-day intervals and calculate mean DS
+var timeSeries = ee.FeatureCollection(intervals.map(function(start) {
+  start = ee.Date(start);
+  var end = start.advance(5, 'day');
+  var filtered = drySoilCollection.filterDate(start, end);
+  var size = filtered.size();
+  return ee.Algorithms.If(size.gt(0),
+    ee.Feature(null, {
+      'date': start.format('YYYY-MM-dd'),
+      'mean_DS': filtered.select('DS').mean().reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: aoi,
+        scale: 30,
+        maxPixels: 1e8
+      }).get('DS')
+    }),
+    // Else return null value
+    ee.Feature(null, {
+      'date': start.format('YYYY-MM-dd'),
+      'mean_DS': null
+    })
+  );
+}));
+
+// ---------------------------------------------------
+
+// Create chart from features
+var chart = ui.Chart.feature.byFeature(timeSeries, 'date', 'mean_DS')
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'Mean Dry Soil Index (5-Day Interval)',
+    hAxis: {title: 'Date', slantedText: true},
+    vAxis: {title: 'Mean Dry Soil Value'},
+    lineWidth: 2,
+    pointSize: 4,
+    series: {0: {color: 'orange'}}
+  });
+
+print(chart);
+
+//---------------------------------------------------------------------------
+
+// Dry soil image (median) for map visualization
+var drySoilImage = drySoilCollection.median().select('DS').clip(aoi);
+Map.addLayer(drySoilImage, {min: 0, max: 1, palette: ['white', 'orange']}, 'Dry Soil Mask');
+
+//----------------------------------------------------------------------
+
+// -------------------- Legend UI --------------------
+
+// Create a panel to hold the legend
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px'
+  }
+});
+
+// Create legend title
+var legendTitle = ui.Label({
+  value: 'Dry Soil Legend',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '14px',
+    margin: '0 0 6px 0',
+    padding: '0'
+  }
+});
+
+legend.add(legendTitle);
+
+// Define palette and names
+var palette = ['white', 'orange'];
+var names = ['Non-Dry Soil', 'Dry Soil'];
+
+// Create and add color boxes and labels
+for (var i = 0; i < palette.length; i++) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: palette[i],
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: names[i],
+    style: { margin: '0 0 4px 6px' }
+  });
+
+  var entry = ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+
+  legend.add(entry);
+}
+
+// Add legend to the map
+Map.add(legend);
+//-----------------------------------------------------------
+
+// Export final dry soil image (optional)
+Export.image.toDrive({
+  image: drySoilImage,
+  description: 'Dry_Soil_Mask_Sentinel2',
+  scale: 10,
+  region: aoi,
+  maxPixels: 1e13
+});
