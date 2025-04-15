@@ -1,4 +1,5 @@
 # Dry-Soil-Detection
+Dry soil refers to soil that has a low moisture content—meaning it lacks sufficient water in its pores to support healthy plant growth or maintain its structure.
 
 # Dry Soil Detection using Sentinel-2 Data
 
